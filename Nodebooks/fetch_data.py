@@ -1,48 +1,51 @@
 import os
 import json
+import time
 import requests
 
 # ---- Konfiguration ----
-API_KEY = "0a51501f0bc740b39ac6633ef6e913d9"   # dein Key von football-data.org
-BASE_URL = "https://api.football-data.org/v4"
-COMPETITION = "BL1"   # Bundesliga. Andere Codes: PL, SA, FL1, PD, CL, DED ...
+API_KEY     = "0a51501f0bc740b39ac6633ef6e913d9"
+BASE_URL    = "https://api.football-data.org/v4"
+COMPETITION = "BL1"
+HEADERS     = {"X-Auth-Token": API_KEY}
 
-HEADERS = {"X-Auth-Token": API_KEY}
-
-# Ordner, in dem die JSON-Dateien gespeichert werden
+SEASONS    = [2021, 2022, 2023, 2024, 2025]
 OUTPUT_DIR = "data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def fetch_and_save(endpoint: str, filename: str):
-    """Holt Daten von einem Endpunkt und speichert sie als JSON-Datei."""
-    url = f"{BASE_URL}/{endpoint}"
-    print(f"Hole Daten von: {url}")
+    url  = f"{BASE_URL}/{endpoint}"
+    print(f"  Hole: {url}")
+    resp = requests.get(url, headers=HEADERS)
 
-    response = requests.get(url, headers=HEADERS)
-
-    if response.status_code != 200:
-        print(f"  Fehler: Status {response.status_code} -> {response.text}")
+    if resp.status_code != 200:
+        print(f"  Fehler: {resp.status_code} -> {resp.text}")
         return
-
-    data = response.json()
 
     filepath = os.path.join(OUTPUT_DIR, filename)
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    print(f"  Gespeichert unter: {filepath}")
+        json.dump(resp.json(), f, ensure_ascii=False, indent=2)
+    print(f"  Gespeichert: {filepath}")
 
 
 def main():
-    # 1. Teams der Liga
-    fetch_and_save(f"competitions/{COMPETITION}/teams", "teams_bl1.json")
+    for season in SEASONS:
+        print(f"\n--- Saison {season}/{str(season+1)[-2:]} ---")
 
-    # 2. Alle Spiele der aktuellen Saison
-    fetch_and_save(f"competitions/{COMPETITION}/matches", "matches_bl1.json")
+        # Teams dieser Saison (wichtig: jede Saison hat andere Teams!)
+        fetch_and_save(
+            f"competitions/{COMPETITION}/teams?season={season}",
+            f"teams_bl1_{season}.json"
+        )
+        time.sleep(6)
 
-    # 3. Aktuelle Tabelle
-    fetch_and_save(f"competitions/{COMPETITION}/standings", "standings_bl1.json")
+        # Spiele dieser Saison
+        fetch_and_save(
+            f"competitions/{COMPETITION}/matches?season={season}",
+            f"matches_bl1_{season}.json"
+        )
+        time.sleep(6)
 
     print("\nFertig! Alle Dateien liegen im Ordner 'data/'.")
 
