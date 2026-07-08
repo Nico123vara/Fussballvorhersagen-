@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 import pickle
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import requests
+from datetime import date, timedelta
 
 # ─── Konfiguration ───────────────────────────────────────────────────────────
 DB_CONFIG = {
@@ -13,6 +13,10 @@ DB_CONFIG = {
     'user':     'fussball',
     'password': 'fussball_pw'
 }
+
+API_KEY  = "0a51501f0bc740b39ac6633ef6e913d9"
+BASE_URL = "https://api.football-data.org/v4"
+HEADERS  = {"X-Auth-Token": API_KEY}
 
 st.set_page_config(
     page_title="Bundesliga Vorhersagen",
@@ -25,7 +29,6 @@ st.markdown("""
 <style>
     .main { background-color: #0d1117; }
     .block-container { padding-top: 2rem; }
-
     .team-card {
         background: #161b22;
         border: 1px solid #30363d;
@@ -33,28 +36,9 @@ st.markdown("""
         padding: 1.5rem;
         margin-bottom: 1rem;
     }
-
-    .result-card {
-        background: #161b22;
-        border: 1px solid #238636;
-        border-radius: 12px;
-        padding: 2rem;
-        text-align: center;
-        margin: 1rem 0;
-    }
-
-    .stat-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 0.4rem 0;
-        border-bottom: 1px solid #21262d;
-        font-size: 0.9rem;
-    }
-
     h1 { color: #f0f6fc !important; }
     h2 { color: #c9d1d9 !important; }
     h3 { color: #8b949e !important; }
-
     .stSelectbox label { color: #8b949e !important; }
     .stTabs [data-baseweb="tab"] { color: #8b949e; }
     .stTabs [aria-selected="true"] { color: #58a6ff !important; border-bottom-color: #58a6ff !important; }
@@ -110,6 +94,21 @@ def load_models():
     with open('data/model_no_promoted.pkl', 'rb') as f:
         model_b = pickle.load(f)
     return model_a, model_b
+
+
+@st.cache_data(ttl=3600)
+def load_upcoming_matches():
+    """Holt alle Spiele der nächsten 7 Tage von der API."""
+    heute          = date.today()
+    naechste_woche = heute + timedelta(days=7)
+    resp = requests.get(
+        f"{BASE_URL}/competitions/BL1/matches"
+        f"?dateFrom={heute}&dateTo={naechste_woche}&status=SCHEDULED",
+        headers=HEADERS
+    )
+    if resp.status_code != 200:
+        return []
+    return resp.json().get("matches", [])
 
 
 # ─── Feature-Funktionen ───────────────────────────────────────────────────────
@@ -193,14 +192,49 @@ def is_promoted(df, team_id, current_season_id):
 
 def get_team_features(df, team_id, current_season_id):
     return {
-        'form':       get_form(df, team_id),
-        'form_home':  get_home_form(df, team_id),
-        'form_away':  get_away_form(df, team_id),
-        'heimquote':  get_heimquote(df, team_id),
-        'streak':     get_win_streak(df, team_id),
-        'goal_diff':  get_goal_diff(df, team_id),
-        'promoted':   is_promoted(df, team_id, current_season_id)
+        'form':      get_form(df, team_id),
+        'form_home': get_home_form(df, team_id),
+        'form_away': get_away_form(df, team_id),
+        'heimquote': get_heimquote(df, team_id),
+        'streak':    get_win_streak(df, team_id),
+        'goal_diff': get_goal_diff(df, team_id),
+        'promoted':  is_promoted(df, team_id, current_season_id)
     }
+
+
+def make_prediction(matches, teams_df, model_a, model_b, home_id, away_id, current_season_id):
+    home_feat = get_team_features(matches, home_id, current_season_id)
+    away_feat = get_team_features(matches, away_id, current_season_id)
+
+    if home_feat['promoted'] == 1 or away_feat['promoted'] == 1:
+        model_data  = model_a
+        modell_name = "Modell mit Aufsteiger"
+    else:
+        model_data  = model_b
+        modell_name = "Standardmodell"
+
+    model    = model_data['model']
+    features = model_data['features']
+
+    beispiel = pd.DataFrame([{
+        'home_form':        home_feat['form'],
+        'away_form':        away_feat['form'],
+        'home_form_home':   home_feat['form_home'],
+        'away_form_away':   away_feat['form_away'],
+        'heimquote':        home_feat['heimquote'],
+        'home_streak':      home_feat['streak'],
+        'away_streak':      away_feat['streak'],
+        'home_goal_diff':   home_feat['goal_diff'],
+        'away_goal_diff':   away_feat['goal_diff'],
+        'is_promoted_home': home_feat['promoted'],
+        'is_promoted_away': away_feat['promoted']
+    }])[features]
+
+    probs   = model.predict_proba(beispiel)[0]
+    klassen = model.classes_
+    label_map = {1: 'Heimsieg', 0: 'Unentschieden', -1: 'Auswärtssieg'}
+    prob_dict = {label_map[k]: p for k, p in zip(klassen, probs)}
+    return prob_dict, modell_name
 
 
 # ─── Statistik-Komponenten ────────────────────────────────────────────────────
@@ -224,10 +258,10 @@ def show_team_stats(df, team_id, team_name):
 
     st.markdown("#### Letzte 10 Spiele")
     for _, s in spiele.iterrows():
-        heim    = s['home_team'] == team_name
-        gegner  = s['away_team'] if heim else s['home_team']
-        tore_f  = s['home_score_fulltime'] if heim else s['away_score_fulltime']
-        tore_g  = s['away_score_fulltime'] if heim else s['home_score_fulltime']
+        heim   = s['home_team'] == team_name
+        gegner = s['away_team'] if heim else s['home_team']
+        tore_f = s['home_score_fulltime'] if heim else s['away_score_fulltime']
+        tore_g = s['away_score_fulltime'] if heim else s['home_score_fulltime']
 
         if s['winner'] == 'DRAW':
             result, color = "U", "#e3b341"
@@ -253,16 +287,40 @@ def show_team_stats(df, team_id, team_name):
         )
 
 
+def show_prob_bars(prob_dict):
+    farben = {
+        'Heimsieg':      '#3fb950',
+        'Unentschieden': '#e3b341',
+        'Auswärtssieg':  '#f85149'
+    }
+    beste = max(prob_dict, key=prob_dict.get)
+    for label, prob in sorted(prob_dict.items(), key=lambda x: -x[1]):
+        ist_beste = label == beste
+        st.markdown(
+            f'<div style="margin:8px 0">'
+            f'<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
+            f'<span style="color:{"#f0f6fc" if ist_beste else "#8b949e"};'
+            f'font-weight:{"700" if ist_beste else "400"}">{label}</span>'
+            f'<span style="color:{farben[label]};font-weight:700">{prob*100:.1f}%</span>'
+            f'</div>'
+            f'<div style="background:#21262d;border-radius:4px;height:8px">'
+            f'<div style="background:{farben[label]};width:{prob*100:.1f}%;'
+            f'height:8px;border-radius:4px"></div>'
+            f'</div></div>',
+            unsafe_allow_html=True
+        )
+    return beste
+
+
 # ─── Hauptapp ────────────────────────────────────────────────────────────────
 def main():
     st.title("⚽ Bundesliga Vorhersagen")
     st.markdown("---")
 
-    teams_df  = load_teams()
-    matches   = load_matches()
+    teams_df         = load_teams()
+    matches          = load_matches()
     model_a, model_b = load_models()
-
-    team_names = teams_df['name'].tolist()
+    team_names       = teams_df['name'].tolist()
     current_season_id = matches['season_id'].max()
 
     # Team-Auswahl
@@ -276,93 +334,101 @@ def main():
     home_id = teams_df[teams_df['name'] == home_team]['id'].values[0]
     away_id = teams_df[teams_df['name'] == away_team]['id'].values[0]
 
-    # Features berechnen
-    home_feat = get_team_features(matches, home_id, current_season_id)
-    away_feat = get_team_features(matches, away_id, current_season_id)
-
-    # Modell wählen
-    if home_feat['promoted'] == 1 or away_feat['promoted'] == 1:
-        model_data  = model_a
-        modell_name = "Modell mit Aufsteiger"
-    else:
-        model_data  = model_b
-        modell_name = "Standardmodell"
-
-    model    = model_data['model']
-    features = model_data['features']
-
-    beispiel = pd.DataFrame([{
-        'home_form':        home_feat['form'],
-        'away_form':        away_feat['form'],
-        'home_form_home':   home_feat['form_home'],
-        'away_form_away':   away_feat['form_away'],
-        'heimquote':        home_feat['heimquote'],
-        'home_streak':      home_feat['streak'],
-        'away_streak':      away_feat['streak'],
-        'home_goal_diff':   home_feat['goal_diff'],
-        'away_goal_diff':   away_feat['goal_diff'],
-        'is_promoted_home': home_feat['promoted'],
-        'is_promoted_away': away_feat['promoted']
-    }])[features]
-
-    probs    = model.predict_proba(beispiel)[0]
-    klassen  = model.classes_
-    label_map = {1: 'Heimsieg', 0: 'Unentschieden', -1: 'Auswärtssieg'}
-
-    prob_dict = {label_map[k]: p for k, p in zip(klassen, probs)}
-    beste     = max(prob_dict, key=prob_dict.get)
-
     # Tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Vorhersage", f"🏠 {home_team}", f"✈️ {away_team}"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Vorhersage",
+        f"🏠 {home_team}",
+        f"✈️ {away_team}",
+        "📅 Nächste Woche"
+    ])
 
+    # ── Tab 1: Vorhersage ──
     with tab1:
         st.markdown(f"#### {home_team} vs {away_team}")
+        prob_dict, modell_name = make_prediction(
+            matches, teams_df, model_a, model_b,
+            home_id, away_id, current_season_id
+        )
         st.caption(f"Modell: {modell_name}")
-
-        # Wahrscheinlichkeiten als Balken
-        farben = {
-            'Heimsieg':       '#3fb950',
-            'Unentschieden':  '#e3b341',
-            'Auswärtssieg':   '#f85149'
-        }
-
-        for label, prob in sorted(prob_dict.items(), key=lambda x: -x[1]):
-            ist_beste = label == beste
-            st.markdown(
-                f'<div style="margin:8px 0">'
-                f'<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
-                f'<span style="color:{"#f0f6fc" if ist_beste else "#8b949e"};'
-                f'font-weight:{"700" if ist_beste else "400"}">{label}</span>'
-                f'<span style="color:{farben[label]};font-weight:700">{prob*100:.1f}%</span>'
-                f'</div>'
-                f'<div style="background:#21262d;border-radius:4px;height:8px">'
-                f'<div style="background:{farben[label]};width:{prob*100:.1f}%;'
-                f'height:8px;border-radius:4px"></div>'
-                f'</div></div>',
-                unsafe_allow_html=True
-            )
-
+        beste = show_prob_bars(prob_dict)
         st.markdown("---")
         st.markdown(f"**Vorhersage: {beste}**")
 
-        # Schnellvergleich
         st.markdown("#### Teamvergleich")
-        comp_col1, comp_col2, comp_col3 = st.columns(3)
-        with comp_col1:
-            st.metric(home_team, f"{home_feat['form']}/15", label_visibility="collapsed")
-            st.caption("Form letzte 5")
-        with comp_col2:
-            st.markdown("<div style='text-align:center;color:#8b949e;padding-top:8px'>vs</div>",
-                       unsafe_allow_html=True)
-        with comp_col3:
-            st.metric(away_team, f"{away_feat['form']}/15", label_visibility="collapsed")
-            st.caption("Form letzte 5")
+        home_feat = get_team_features(matches, home_id, current_season_id)
+        away_feat = get_team_features(matches, away_id, current_season_id)
 
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Form", f"{home_feat['form']}/15")
+            st.metric("Heimquote", f"{home_feat['heimquote']*100:.0f}%")
+            st.metric("Ø Tordifferenz", f"{home_feat['goal_diff']:+.1f}")
+        with c2:
+            st.markdown("<div style='text-align:center;color:#8b949e;padding-top:24px'>vs</div>",
+                       unsafe_allow_html=True)
+        with c3:
+            st.metric("Form", f"{away_feat['form']}/15")
+            st.metric("Auswärtsquote", f"{get_away_form(matches, away_id)/15*100:.0f}%")
+            st.metric("Ø Tordifferenz", f"{away_feat['goal_diff']:+.1f}")
+
+    # ── Tab 2: Heimteam Stats ──
     with tab2:
         show_team_stats(matches, home_id, home_team)
 
+    # ── Tab 3: Auswärtsteam Stats ──
     with tab3:
         show_team_stats(matches, away_id, away_team)
+
+    # ── Tab 4: Nächste Woche ──
+    with tab4:
+        st.markdown("### Spiele der nächsten 7 Tage")
+        upcoming = load_upcoming_matches()
+
+        if not upcoming:
+            st.info("Keine Spiele in den nächsten 7 Tagen — wahrscheinlich Sommerpause. 🌴")
+            st.caption("Sobald die Saison startet, werden hier alle kommenden Spiele mit Vorhersagen angezeigt.")
+        else:
+            for m in upcoming:
+                home_name = m['homeTeam']['name']
+                away_name = m['awayTeam']['name']
+                datum     = m['utcDate'][:10]
+                uhrzeit   = m['utcDate'][11:16]
+
+                # Team IDs aus DB holen
+                home_row = teams_df[teams_df['name'] == home_name]
+                away_row = teams_df[teams_df['name'] == away_name]
+
+                with st.container():
+                    col_date, col_match, col_pred = st.columns([1, 2, 2])
+
+                    with col_date:
+                        st.markdown(f"**{datum}**")
+                        st.caption(f"{uhrzeit} Uhr")
+
+                    with col_match:
+                        st.markdown(f"**{home_name}** vs **{away_name}**")
+                        st.caption(f"Spieltag {m.get('matchday', '?')}")
+
+                    with col_pred:
+                        if not home_row.empty and not away_row.empty:
+                            prob_dict, _ = make_prediction(
+                                matches, teams_df, model_a, model_b,
+                                home_row['id'].values[0],
+                                away_row['id'].values[0],
+                                current_season_id
+                            )
+                            beste = max(prob_dict, key=prob_dict.get)
+                            farbe = {'Heimsieg': '#3fb950', 'Unentschieden': '#e3b341', 'Auswärtssieg': '#f85149'}[beste]
+                            st.markdown(
+                                f'<span style="background:{farbe};color:#0d1117;padding:4px 12px;'
+                                f'border-radius:6px;font-weight:700">{beste}</span>'
+                                f' <span style="color:#8b949e">{prob_dict[beste]*100:.0f}%</span>',
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            st.caption("Keine Daten verfügbar")
+
+                st.markdown("---")
 
 
 if __name__ == "__main__":
