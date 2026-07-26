@@ -1,0 +1,14 @@
+# Secrets — nie auf GitHub!
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Daten
+data/features.csv
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
