@@ -37,16 +37,14 @@ def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def load_data(liga_code):
+def load_data(conn, liga_code):
     print(f"  Lade Daten für {liga_code}...")
-    conn = get_connection()
     query = """
-        SELECT
-            m.id, m.utc_date, m.matchday, m.season_id,
-            s.start_date AS season_start,
-            m.home_team_id, m.away_team_id,
-            m.home_score_fulltime, m.away_score_fulltime,
-            m.winner
+        SELECT m.id, m.utc_date, m.matchday, m.season_id,
+               s.start_date AS season_start,
+               m.home_team_id, m.away_team_id,
+               m.home_score_fulltime, m.away_score_fulltime,
+               m.winner
         FROM matches m
         JOIN seasons s ON m.season_id = s.id
         JOIN competitions c ON m.competition_id = c.id
@@ -54,7 +52,6 @@ def load_data(liga_code):
         ORDER BY m.utc_date ASC
     """
     df = pd.read_sql(query, conn, params=(liga_code,))
-    conn.close()
     df['utc_date']     = pd.to_datetime(df['utc_date'])
     df['season_start'] = pd.to_datetime(df['season_start'])
     df['season']       = df['season_start'].dt.year
@@ -86,10 +83,7 @@ def get_form(df, team_id, date, season_id, prev_map, n=5):
 
 def get_home_form(df, team_id, date, season_id, prev_map, n=5):
     prev_sid = prev_map.get(season_id, season_id)
-    spiele = df[
-        (df['home_team_id'] == team_id) &
-        (df['utc_date'] < date) & (df['season_id'] >= prev_sid)
-    ].tail(n)
+    spiele = df[(df['home_team_id'] == team_id) & (df['utc_date'] < date) & (df['season_id'] >= prev_sid)].tail(n)
     punkte = 0
     for _, s in spiele.iterrows():
         if s['winner'] == 'HOME_TEAM': punkte += 3
@@ -99,10 +93,7 @@ def get_home_form(df, team_id, date, season_id, prev_map, n=5):
 
 def get_away_form(df, team_id, date, season_id, prev_map, n=5):
     prev_sid = prev_map.get(season_id, season_id)
-    spiele = df[
-        (df['away_team_id'] == team_id) &
-        (df['utc_date'] < date) & (df['season_id'] >= prev_sid)
-    ].tail(n)
+    spiele = df[(df['away_team_id'] == team_id) & (df['utc_date'] < date) & (df['season_id'] >= prev_sid)].tail(n)
     punkte = 0
     for _, s in spiele.iterrows():
         if s['winner'] == 'AWAY_TEAM': punkte += 3
@@ -112,10 +103,7 @@ def get_away_form(df, team_id, date, season_id, prev_map, n=5):
 
 def get_heimquote(df, team_id, date, season_id, prev_map, n=12):
     prev_sid = prev_map.get(season_id, season_id)
-    spiele = df[
-        (df['home_team_id'] == team_id) &
-        (df['utc_date'] < date) & (df['season_id'] >= prev_sid)
-    ].tail(n)
+    spiele = df[(df['home_team_id'] == team_id) & (df['utc_date'] < date) & (df['season_id'] >= prev_sid)].tail(n)
     if len(spiele) == 0: return 0.5
     return (spiele['winner'] == 'HOME_TEAM').mean()
 
@@ -165,40 +153,21 @@ def is_promoted(df, team_id, season_id, matchday, prev_map):
 
 
 def get_table_position(df, team_id, date, season_id, matchday, prev_map):
-    """
-    Tabellenposition zum Zeitpunkt des Spiels.
-    Aufsteiger in ersten 5 Spieltagen → Platz 18 (letzter).
-    """
-    # Aufsteiger → letzter Platz für erste 5 Spieltage
     if is_promoted(df, team_id, season_id, matchday, prev_map) == 1:
         return 18
-
-    # Alle Spiele dieser Saison vor diesem Datum
-    spiele = df[
-        (df['season_id'] == season_id) &
-        (df['utc_date'] < date)
-    ]
-
-    if len(spiele) == 0:
-        return 10  # Noch keine Spiele → Mittelfeld
-
-    # Punkte für alle Teams berechnen
-    teams = set(spiele['home_team_id'].tolist() + spiele['away_team_id'].tolist())
+    spiele = df[(df['season_id'] == season_id) & (df['utc_date'] < date)]
+    if len(spiele) == 0: return 10
+    teams  = set(spiele['home_team_id'].tolist() + spiele['away_team_id'].tolist())
     punkte = {t: 0 for t in teams}
-
     for _, s in spiele.iterrows():
         h = s['home_team_id']
         a = s['away_team_id']
-        if s['winner'] == 'HOME_TEAM':
-            punkte[h] += 3
-        elif s['winner'] == 'AWAY_TEAM':
-            punkte[a] += 3
+        if s['winner'] == 'HOME_TEAM': punkte[h] += 3
+        elif s['winner'] == 'AWAY_TEAM': punkte[a] += 3
         elif s['winner'] == 'DRAW':
             punkte[h] += 1
             punkte[a] += 1
-
-    # Sortieren → Position
-    sortiert = sorted(punkte.items(), key=lambda x: -x[1])
+    sortiert   = sorted(punkte.items(), key=lambda x: -x[1])
     positionen = {t: i+1 for i, (t, _) in enumerate(sortiert)}
     return positionen.get(team_id, 10)
 
@@ -241,86 +210,77 @@ def compute_features(df):
 
 
 def clean_features(df_features):
-    print("Bereinige Features...")
-    vorher = len(df_features)
     df_features = df_features[df_features['season'] >= 2024]
-    df_features = df_features[
-        ~((df_features['home_form'] == 0) & (df_features['away_form'] == 0))
-    ]
-    df_features = df_features[
-        ~((df_features['home_form_home'] == 0) & (df_features['away_form_away'] == 0))
-    ]
-    print(f"  {vorher} → {len(df_features)} Spiele nach Bereinigung")
+    df_features = df_features[~((df_features['home_form'] == 0) & (df_features['away_form'] == 0))]
+    df_features = df_features[~((df_features['home_form_home'] == 0) & (df_features['away_form_away'] == 0))]
     return df_features
 
 
-def train_model(df_features, liga_name):
-    print(f"Trainiere Modell für {liga_name}...")
+def train_model(df_features):
     label_map = {'HOME_TEAM': 1, 'DRAW': 0, 'AWAY_TEAM': -1}
     df_features['target'] = df_features['winner'].map(label_map)
     df_features = df_features.dropna(subset=FEATURES + ['target'])
-
     train = df_features[
         (df_features['season'] == 2024) |
         ((df_features['season'] == 2025) & (df_features['matchday'] <= 17))
     ]
-    test = df_features[
-        (df_features['season'] == 2025) & (df_features['matchday'] > 17)
-    ]
-
+    test = df_features[(df_features['season'] == 2025) & (df_features['matchday'] > 17)]
     if len(test) == 0:
         split = int(len(df_features) * 0.8)
         train = df_features.iloc[:split]
         test  = df_features.iloc[split:]
-
     X_train = train[FEATURES]
     y_train = train['target']
     X_test  = test[FEATURES]
     y_test  = test['target']
-
     print(f"  Training: {len(train)} | Test: {len(test)}")
-
     baseline = accuracy_score(y_test, [1] * len(y_test))
     print(f"  Baseline: {baseline*100:.1f}%")
-
     lr = LogisticRegression(max_iter=1000, random_state=42)
     lr.fit(X_train, y_train)
     lr_acc = accuracy_score(y_test, lr.predict(X_test))
     print(f"  LR: {lr_acc*100:.1f}%")
-
     rf = RandomForestClassifier(n_estimators=100, random_state=42)
     rf.fit(X_train, y_train)
     rf_acc = accuracy_score(y_test, rf.predict(X_test))
     print(f"  RF: {rf_acc*100:.1f}%")
-
     best_model = rf if rf_acc >= lr_acc else lr
     best_name  = 'RF' if rf_acc >= lr_acc else 'LR'
     print(f"  Bestes: {best_name} ({max(rf_acc, lr_acc)*100:.1f}%)")
     return best_model
 
 
-def save_model(model, liga_code):
-    os.makedirs('data', exist_ok=True)
-    model_data = {'model': model, 'features': FEATURES}
-    path = f'data/model_{liga_code}.pkl'
-    with open(path, 'wb') as f:
-        pickle.dump(model_data, f)
-    print(f"  Gespeichert: {path}")
+def save_model_to_db(conn, model, liga_code):
+    """Modell als Bytes in DB speichern."""
+    model_data  = {'model': model, 'features': FEATURES}
+    model_bytes = pickle.dumps(model_data)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO models (name, data)
+        VALUES (%s, %s)
+        ON CONFLICT (name) DO UPDATE SET data = EXCLUDED.data, created_at = now()
+    """, (liga_code, psycopg2.Binary(model_bytes)))
+    conn.commit()
+    cur.close()
+    print(f"  Modell '{liga_code}' in DB gespeichert")
 
 
 def main():
-    print("=== Retrain — Alle Ligen mit Tabellenplatz ===\n")
+    print("=== Retrain — Alle Ligen ===\n")
+    conn = get_connection()
 
     for liga_code, liga_name in LIGEN.items():
         print(f"--- {liga_name} ({liga_code}) ---")
-        df          = load_data(liga_code)
+        df          = load_data(conn, liga_code)
         df_features = compute_features(df)
         df_features = clean_features(df_features)
-        model       = train_model(df_features, liga_name)
-        save_model(model, liga_code)
+        print(f"  {len(df_features)} Spiele nach Bereinigung")
+        model = train_model(df_features)
+        save_model_to_db(conn, model, liga_code)
         print()
 
-    print("Fertig! Nicht vergessen: git add data/ && git commit && git push")
+    conn.close()
+    print("Fertig!")
 
 
 if __name__ == "__main__":

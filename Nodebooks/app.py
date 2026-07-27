@@ -59,8 +59,15 @@ def load_matches(liga_code):
 
 @st.cache_data
 def load_model(liga_code):
-    with open(f'data/model_{liga_code}.pkl', 'rb') as f:
-        return pickle.load(f)
+    """Modell aus DB laden."""
+    conn = get_connection()
+    cur  = conn.cursor()
+    cur.execute("SELECT data FROM models WHERE name = %s", (liga_code,))
+    row = cur.fetchone()
+    cur.close()
+    if row is None:
+        raise FileNotFoundError(f"Kein Modell für {liga_code} in DB!")
+    return pickle.loads(row[0])
 
 
 @st.cache_data(ttl=3600)
@@ -112,7 +119,6 @@ def load_upcoming_matches(liga_code):
     return resp.json().get("matches", [])
 
 
-# ─── Feature-Funktionen ───────────────────────────────────────────────────────
 def get_prev_season_id(matches, season_id):
     season_ids = sorted(matches['season_id'].unique())
     idx = list(season_ids).index(season_id) if season_id in season_ids else -1
@@ -208,16 +214,12 @@ def is_promoted(matches, team_id, season_id, matchday):
 
 
 def get_table_position(matches, team_id, season_id, matchday):
-    """Tabellenposition zum aktuellen Zeitpunkt. Aufsteiger → Platz 18."""
     if is_promoted(matches, team_id, season_id, matchday) == 1:
         return 18
-
     spiele = matches[matches['season_id'] == season_id]
     if len(spiele) == 0: return 10
-
     teams  = set(spiele['home_team_id'].tolist() + spiele['away_team_id'].tolist())
     punkte = {t: 0 for t in teams}
-
     for _, s in spiele.iterrows():
         h = s['home_team_id']
         a = s['away_team_id']
@@ -226,7 +228,6 @@ def get_table_position(matches, team_id, season_id, matchday):
         elif s['winner'] == 'DRAW':
             punkte[h] += 1
             punkte[a] += 1
-
     sortiert   = sorted(punkte.items(), key=lambda x: -x[1])
     positionen = {t: i+1 for i, (t, _) in enumerate(sortiert)}
     return positionen.get(team_id, 10)
@@ -271,7 +272,6 @@ def make_prediction(matches, model_data, home_id, away_id, season_id, matchday=9
     return {label_map[k]: p for k, p in zip(klassen, probs)}
 
 
-# ─── UI ───────────────────────────────────────────────────────────────────────
 def show_prob_bars(prob_dict):
     farben = {'Heimsieg': '#3fb950', 'Unentschieden': '#e3b341', 'Auswärtssieg': '#f85149'}
     beste  = max(prob_dict, key=prob_dict.get)
@@ -335,7 +335,6 @@ def show_team_stats(matches, team_id, team_name, season_id):
         )
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
     if 'liga' not in st.session_state:
         st.session_state.liga = 'Bundesliga'
@@ -382,18 +381,21 @@ def main():
     home_id = teams_df[teams_df['name'] == home_team]['id'].values[0]
     away_id = teams_df[teams_df['name'] == away_team]['id'].values[0]
 
+    upcoming_preview = load_upcoming_matches(liga_code)
+    next_matchday    = upcoming_preview[0].get('matchday', 99) if upcoming_preview else 99
+
     tab1, tab2, tab3 = st.tabs(["📊 Vorhersage", "📅 Nächste 4 Wochen", "🎯 Meine Genauigkeit"])
 
     with tab1:
         st.markdown(f"#### {home_team} vs {away_team}")
-        prob_dict = make_prediction(matches, model_data, home_id, away_id, current_season_id)
+        prob_dict = make_prediction(matches, model_data, home_id, away_id, current_season_id, next_matchday)
         beste = show_prob_bars(prob_dict)
         st.markdown("---")
         st.markdown(f"**Vorhersage: {beste}**")
 
         st.markdown("#### Teamvergleich")
-        home_feat = get_team_features(matches, home_id, current_season_id)
-        away_feat = get_team_features(matches, away_id, current_season_id)
+        home_feat = get_team_features(matches, home_id, current_season_id, next_matchday)
+        away_feat = get_team_features(matches, away_id, current_season_id, next_matchday)
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -445,11 +447,10 @@ def main():
                     st.caption(f"Spieltag {m.get('matchday', '?')}")
                 with col_pred:
                     if not home_row.empty and not away_row.empty:
-                        current_matchday = int(matches['matchday'].max())
                         prob_dict = make_prediction(
                             matches, model_data,
                             home_row['id'].values[0], away_row['id'].values[0],
-                            current_season_id, current_matchday
+                            current_season_id, m.get('matchday', 99)
                         )
                         beste = max(prob_dict, key=prob_dict.get)
                         farbe = {'Heimsieg': '#3fb950', 'Unentschieden': '#e3b341', 'Auswärtssieg': '#f85149'}[beste]
