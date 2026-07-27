@@ -1,0 +1,44 @@
+name: Wöchentliches Update
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # jeden Montag um 08:00 UTC
+  workflow_dispatch:       # auch manuell ausführbar
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: Python installieren
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Dependencies installieren
+        run: |
+          pip install psycopg2-binary pandas scikit-learn requests
+
+      - name: Neue Spiele laden
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd Nodebooks
+          python monthly_update.py
+
+      - name: Modelle neu trainieren
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd Nodebooks
+          python retrain.py
+
+      - name: Vorhersagen speichern
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd Nodebooks
+          python save_predictions.py
